@@ -1,5 +1,16 @@
 #!/bin/bash
-
 # In /N/slate/yl278/GSF4595
-mkdir results
-fastqc -o results/ *.fastq 
+
+# Create a folder to store the fastqc results
+mkdir fastqc_results
+# Run fastqc
+fastqc \
+  --outdir /N/slate/yl278/GSF4595/fastqc_results \
+  raw_data/GSF4595-HH789_s_rep1-A_S1_R1_001.fastq.gz \
+  raw_data/GSF4595-HH789_s_rep1-A_S1_R2_001.fastq.gz
+
+# download the html filt to mac
+scp yl278@quartz.uits.iu.edu:/N/slate/yl278/GSF4595/fastqc_results/GSF4595-HH789_s_rep1-A_S1_R1_001_fastqc.html ~/Downloads/
+scp yl278@quartz.uits.iu.edu:/N/slate/yl278/GSF4595/fastqc_results/GSF4595-HH789_s_rep1-A_S1_R2_001_fastqc.html ~/Downloads/
+
+
