@@ -44,7 +44,7 @@ STAR \
   --readFilesCommand zcat \
   --outFilterMultimapNmax 1 \
   --outFilterScoreMinOverLread 0.66 \
-  --outFilterMismatchNmax 13 \
+  --outFilterMismatchNmax 10 \
   --outFilterMismatchNoverLmax 0.3 \
   --outFileNamePrefix "$PREFIX" \
   --outSAMattributes All \
