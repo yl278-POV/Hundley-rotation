@@ -13,4 +13,28 @@ fastqc \
 scp yl278@quartz.uits.iu.edu:/N/slate/yl278/GSF4595/fastqc_results/GSF4595-HH789_s_rep1-A_S1_R1_001_fastqc.html ~/Downloads/
 scp yl278@quartz.uits.iu.edu:/N/slate/yl278/GSF4595/fastqc_results/GSF4595-HH789_s_rep1-A_S1_R2_001_fastqc.html ~/Downloads/
 
+####### high  thoughput running #######
+nano run_fastqc_all.sh
 
+#!/bin/bash
+### 让脚本遇到问题时尽早停下来，避免继续运行并产生不完整结果
+set -euo pipefail
+
+cd /N/slate/yl278/GSF4595
+mkdir -p fastqc_results
+
+FASTQS=(raw_data/*.fastq.gz)
+
+if [[ ! -e "${FASTQS[0]}" ]]; then
+    echo "we cannot find .fastq.gz in raw_data"
+    exit 1
+fi
+
+fastqc \
+  --threads 4 \
+  --outdir fastqc_results \
+  "${FASTQS[@]}"
+
+
+
+nano run_fastqc_all.sh
