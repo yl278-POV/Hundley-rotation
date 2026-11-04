@@ -1,0 +1,29 @@
+# Find all .bam files in the star_results directory, then index each one individually
+BAMS=($(find ./star_results -name "*\.bam"))
+
+for BAM in ${BAMS[@]}; do 
+  samtools index $BAM
+  done
+
+# Create an output directory for read counts.
+mkdir -p feature_counts_results
+
+# Count reads.
+BAMS=$(find ./star_results -name "*\.bam")
+
+featureCounts \
+  -a genome/annotation.gtf \
+  -o feature_counts_results/HH789_s_rep1-A_counts.txt \
+  -t gene \
+  -g gene_id \
+  --largestOverlap \
+  --primary \
+  -p --countReadPairs \
+  -s 2 \
+  -T 8 \
+  ${BAMS}
+done
+
+# Look at % uniquely mapped reads
+cat feature_counts_results/HH789_s_rep1-A_counts.txt.summary
+head -n 5 feature_counts_results/HH789_s_rep1-A_counts.txt
