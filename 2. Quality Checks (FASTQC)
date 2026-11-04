@@ -1,0 +1,5 @@
+#!/bin/bash
+
+# In /N/slate/yl278/GSF4595
+mkdir results
+fastqc -o results/ *.fastq 
