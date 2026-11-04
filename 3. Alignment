@@ -1,1 +1,51 @@
+#!/bin/bash
+# In /N/slate/yl278/GSF4595
 
+# Remember to activate your environment.
+conda activate rnaseq
+
+# Make a directory to store the genome files.
+mkdir -p genome
+cd genome
+
+# download genomes and annotation
+# if cannot download the newest one, go to website (https://wormbase.org/about/userguide#3--10) and download
+ASSEMBLY='ftp://ftp.wormbase.org/pub/wormbase/releases/WS298/species/c_elegans/PRJNA13758/c_elegans.PRJNA13758.WS298.genomic.fa.gz'
+ANNOTATION='https://downloads.wormbase.org/releases/WS298/species/c_elegans/PRJNA13758/c_elegans.PRJNA13758.WS298.canonical_geneset.gtf.gz'
+wget $ASSEMBLY 
+wget $ANNOTATION 
+gunzip c_elegans.PRJNA13758.WS298.genomic.fa.gz > assembly.fasta
+gunzip c_elegans.PRJNA13758.WS298.canonical_geneset.gtf.gz > annotation.gtf
+
+# Create a directory to store the index.
+mkdir -p genome/index
+
+# Create the STAR genome index.
+# --genomeSAindexNbases 12 was recommended by software.
+STAR \
+  --runThreadN 4 \
+  --runMode genomeGenerate \
+  --genomeDir genome/index \
+  --genomeFastaFiles genome/assembly.fasta \
+  --sjdbGTFfile genome/annotation.gtf \
+  --genomeSAindexNbases 12
+
+# do STAR (more than 15min)
+mkdir -p star_results
+R1="raw_data/GSF4595-HH789_s_rep1-A_S1_R1_001.fastq.gz"
+R2="raw_data/GSF4595-HH789_s_rep1-A_S1_R2_001.fastq.gz"
+PREFIX="star_results/GSF4595-HH789_s_rep1-A_S1_"
+
+STAR \
+  --runThreadN 8 \
+  --runMode alignReads \
+  --genomeDir genome/index \
+  --readFilesIn "$R1" "$R2" \
+  --readFilesCommand zcat \
+  --outFilterMultimapNmax 1 \
+  --outFilterScoreMinOverLread 0.66 \
+  --outFilterMismatchNmax 13 \
+  --outFilterMismatchNoverLmax 0.3 \
+  --outFileNamePrefix "$PREFIX" \
+  --outSAMattributes All \
+  --outSAMtype BAM SortedByCoordinate
