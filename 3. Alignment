@@ -49,3 +49,116 @@ STAR \
   --outFileNamePrefix "$PREFIX" \
   --outSAMattributes All \
   --outSAMtype BAM SortedByCoordinate
+
+###### run all samples in terminal including star and featurecoounts ######
+nano run_star_all.sh
+
+#####run_star_all.sh:
+######
+#!/bin/bash
+set -euo pipefail
+
+cd /N/slate/yl278/GSF4595
+
+for cmd in STAR samtools featureCounts; do
+    command -v "$cmd" >/dev/null || {
+        echo "ERROR: cannot find $cmd；please activate rnaseq environment" >&2
+        exit 1
+    }
+done
+
+for file in genome/assembly.fasta genome/annotation.gtf; do
+    if [[ ! -s "$file" ]]; then
+        echo "ERROR: cannot find file $file" >&2
+        exit 1
+    fi
+done
+
+mkdir -p star_results feature_counts_results
+
+# set up index for STAR
+INDEX="genome/index"
+
+if [[ ! -s "$INDEX/Genome" ]]; then
+    mkdir -p "$INDEX"
+
+    STAR \
+      --runThreadN 4 \
+      --runMode genomeGenerate \
+      --genomeDir "$INDEX" \
+      --genomeFastaFiles genome/assembly.fasta \
+      --sjdbGTFfile genome/annotation.gtf \
+      --genomeSAindexNbases 12
+fi
+
+# find all R1 files and matched R2
+shopt -s nullglob
+R1_FILES=(raw_data/*_R1_001.fastq.gz)
+
+if (( ${#R1_FILES[@]} == 0 )); then
+    echo "ERROR: cannot find *_R1_001.fastq.gz files in raw_data" >&2
+    exit 1
+fi
+
+BAMS=()
+
+for R1 in "${R1_FILES[@]}"; do
+    R2="${R1%_R1_001.fastq.gz}_R2_001.fastq.gz"
+
+    if [[ ! -s "$R2" ]]; then
+        echo "ERROR: cannot find matched R2：$R2" >&2
+        exit 1
+    fi
+
+    SAMPLE=$(basename "$R1" _R1_001.fastq.gz)
+    PREFIX="star_results/${SAMPLE}_"
+    BAM="${PREFIX}Aligned.sortedByCoord.out.bam"
+        if [[ -s "${PREFIX}Log.final.out" && -s "$BAM" ]]; then
+            echo "Already aligned; skipping: $SAMPLE"
+            if [[ ! -s "${BAM}.bai" ]]; then
+                 samtools index "$BAM"
+         fi
+         BAMS+=("$BAM")
+         continue
+        fi
+    echo "Aligning sample: $SAMPLE"
+
+    STAR \
+      --runThreadN 8 \
+      --runMode alignReads \
+      --genomeDir "$INDEX" \
+      --readFilesIn "$R1" "$R2" \
+      --readFilesCommand zcat \
+      --outFilterMultimapNmax 1 \
+      --outFilterScoreMinOverLread 0.66 \
+      --outFilterMismatchNmax 10 \
+      --outFilterMismatchNoverLmax 0.3 \
+      --outFileNamePrefix "$PREFIX" \
+      --outSAMattributes All \
+      --outSAMtype BAM SortedByCoordinate
+
+    samtools index "$BAM"
+    BAMS+=("$BAM")
+done
+
+# feature counts all samples, output in a count matrix
+featureCounts \
+  -a genome/annotation.gtf \
+  -o feature_counts_results/all_samples_counts.txt \
+  -t gene \
+  -g gene_id \
+  --largestOverlap \
+  --primary \
+  -p --countReadPairs \
+  -s 2 \
+  -T 8 \
+  "${BAMS[@]}"
+
+echo "done! featureCounts summary：feature_counts_results/all_samples_counts.tx$
+######
+
+bash run_star_all.sh
+
+
+
+
