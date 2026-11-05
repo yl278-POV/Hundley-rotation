@@ -50,6 +50,7 @@ STAR \
   --outSAMattributes All \
   --outSAMtype BAM SortedByCoordinate
 
+###########################################################################
 ###### run all samples in terminal including star and featurecoounts ######
 nano run_star_all.sh
 
@@ -158,7 +159,110 @@ echo "done! featureCounts summary：feature_counts_results/all_samples_counts.tx
 ######
 
 bash run_star_all.sh
+################################################################################
 
+################################################################################
+###### submit sbatch file ###### 
+cd /N/slate/yl278/GSF4595
+mkdir -p star_results_sbatch feature_counts_results_sbatch slurm_logs
+nano run_star_all.sbatch
+##### run_star_all.sbatch
+#!/bin/bash
+#SBATCH --job-name=GSF4595_STAR
+#SBATCH --partition=general
+#SBATCH --account=r01267
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=32G
+#SBATCH --time=1-00:00:00
+#SBATCH --output=/N/slate/yl278/GSF4595/slurm_logs/star_%A_%a.out
+#SBATCH --error=/N/slate/yl278/GSF4595/slurm_logs/star_%A_%a.err
 
+set -euo pipefail
+cd /N/slate/yl278/GSF4595
 
+source /N/soft/rhel8/conda/26.3.2/etc/profile.d/conda.sh
+conda activate /N/slate/yl278/rna-seq
+
+shopt -s nullglob
+R1_FILES=(raw_data/*_R1_001.fastq.gz)
+INDEX="genome/index_ws298_151bp"
+
+if [[ ! -s "$INDEX/Genome" ]]; then
+    echo "ERROR: STAR index not found: $INDEX" >&2
+    exit 1
+fi
+
+TASK_INDEX=$((SLURM_ARRAY_TASK_ID - 1))
+if (( TASK_INDEX < 0 || TASK_INDEX >= ${#R1_FILES[@]} )); then
+    echo "ERROR: array task does not match an R1 FASTQ file" >&2
+    exit 1
+fi
+
+R1="${R1_FILES[$TASK_INDEX]}"
+R2="${R1%_R1_001.fastq.gz}_R2_001.fastq.gz"
+SAMPLE=$(basename "$R1" _R1_001.fastq.gz)
+
+if [[ ! -s "$R2" ]]; then
+    echo "ERROR: matching R2 not found: $R2" >&2
+    exit 1
+fi
+
+# Skip a sample if a successful BAM and STAR final log already exist.
+for DIR in star_results star_results_sbatch; do
+    EXISTING_BAM="$DIR/${SAMPLE}_Aligned.sortedByCoord.out.bam"
+    EXISTING_LOG="$DIR/${SAMPLE}_Log.final.out"
+
+    if [[ -s "$EXISTING_BAM" && -s "$EXISTING_LOG" ]]; then
+        if [[ ! -s "${EXISTING_BAM}.bai" ]]; then
+            srun samtools index "$EXISTING_BAM"
+        fi
+        echo "Already complete; skipping $SAMPLE"
+        exit 0
+    fi
+done
+
+PREFIX="star_results_sbatch/${SAMPLE}_"
+BAM="${PREFIX}Aligned.sortedByCoord.out.bam"
+
+echo "Aligning sample: $SAMPLE"
+
+srun STAR \
+  --runThreadN "$SLURM_CPUS_PER_TASK" \
+  --runMode alignReads \
+  --genomeDir "$INDEX" \
+  --readFilesIn "$R1" "$R2" \
+  --readFilesCommand zcat \
+  --outFilterMultimapNmax 1 \
+  --outFilterScoreMinOverLread 0.66 \
+  --outFilterMismatchNmax 10 \
+  --outFilterMismatchNoverLmax 0.3 \
+  --outFileNamePrefix "$PREFIX" \
+  --outSAMattributes All \
+  --outSAMtype BAM SortedByCoordinate
+
+srun samtools index "$BAM"
+echo "Finished sample: $SAMPLE"
+
+#####
+
+# check the number of R1 files
+N=$(find raw_data -maxdepth 1 -type f -name '*_R1_001.fastq.gz' | awk 'END {print NR}')
+echo "$N"
+
+# run the sbatch:
+ARRAY_JOB=$(sbatch --parsable --array="1-${N}%2" run_star_all.sbatch)
+echo "STAR array job ID: $ARRAY_JOB"
+
+# check the status of project
+squeue -u yl278
+
+# after running:
+# check the out logs of star
+ls -lt slurm_logs/
+
+# find the results
+/N/slate/yl278/GSF4595/feature_counts_results_sbatch/all_samples_counts.txt
+################################################################################
 
