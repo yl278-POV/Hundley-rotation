@@ -1,0 +1,243 @@
+# DESeq2 analysis for GSF4595 RNA-seq
+# Run this script in local RStudio after downloading the featureCounts files
+library(DESeq2)
+
+## 1. set file path
+project_dir <- "/Users/yangfan/Documents/2026 Fall/3rd Rotation/GSF4595"
+setwd(project_dir)
+
+# Read featureCounts table
+count_file <- "all_samples_counts.txt"
+if (!file.exists(count_file)) {
+  stop("we cannot find all_samples_counts.txt。")
+}
+
+output_dir <- "DESeq2_results"
+dir.create(output_dir, showWarnings = FALSE)
+
+## 2. load featurecounts and annotation files, and check the gtf file
+fc <- read.delim(
+  count_file,
+  comment.char = "#",
+  check.names = FALSE
+)
+
+# Read gene symbols and biotypes from the same WormBase GTF used for counting.
+# Parse only the GTF's gene rows in chunks to avoid loading the whole file at once.
+gtf_file <- file.path("annotation.gtf")
+if (!file.exists(gtf_file)) {
+  stop("cannot find gtf file:", gtf_file)
+}
+
+# define a function to get gene_id, gene_name, gene_biotype of a gene with the path of GTF file
+read_gene_annotation <- function(gtf_path) {
+  # open the gtf file,'r' means read
+  con <- file(gtf_path, open = "r")
+  # close the file automatically, when it comes to an end
+  on.exit(close(con))
+  # Initialize an empty character vector to collect gene lines from the GTF
+  gene_lines <- character()
+  # read these lines in gtf files
+  repeat {
+    lines <- readLines(con, n = 50000L, warn = FALSE)
+    if (length(lines) == 0L) break
+    # the 3rd column is feature
+    gene_lines <- c(gene_lines, lines[grepl("\\tgene\\t", lines)])
+  }
+  fields <- strsplit(gene_lines, "\\t")
+  # the 9th column is attributes, including gene_id, and gene_name
+  attrs <- vapply(fields, function(x) x[[9]], character(1))
+  # Extract the specified comment fields from the attributes
+  extract_attr <- function(key) {
+    # Find the rows in the "attributes" table that contain the specified field
+    has_key <- grepl(paste0(key, ' "'), attrs, fixed = TRUE)
+    values <- rep(NA_character_, length(attrs))
+    values[has_key] <- sub(
+      paste0(".*", key, ' "([^"]+)".*'), "\\1", attrs[has_key]
+    )
+    values
+  }
+  data.frame(
+    gene_id = extract_attr("gene_id"),
+    gene_name = extract_attr("gene_name"),
+    gene_biotype = extract_attr("gene_biotype"),
+    stringsAsFactors = FALSE
+  )
+}
+
+# Call the above function to read the GTF gene annotation
+gene_annotation <- read_gene_annotation(gtf_file)
+# Delete the rows that do not have a gene_id
+gene_annotation <- gene_annotation[!is.na(gene_annotation$gene_id), ]
+# If a certain gene_id appears multiple times, only the first occurrence record will be retained
+gene_annotation <- gene_annotation[!duplicated(gene_annotation$gene_id), ]
+
+# The featureCounts table usually has 6 columns of gene annotation information
+# featureCounts uses the first six columns for gene annotations; sample columns
+if (ncol(fc) < 7L) {
+  stop("Expected at least 7 columns: 6 gene annotation columns plus sample counts.")
+}
+
+# The first 6 columns of featureCounts represent gene annotations:
+# Geneid, Chr, Start, End, Strand, Length.
+# From the 7th column to the last column are the BAM counts of the samples.
+sample_columns <- 7:ncol(fc)
+
+# The column names of BAM sometimes contain folder paths, basename() removes the path and leaves only the BAM file name.
+bam_names <- basename(colnames(fc)[sample_columns])
+# Remove the suffix of STAR output from the BAM file name to obtain a shorter sample ID.
+sample_ids <- sub("_Aligned.sortedByCoord.out.bam$", "", bam_names)
+
+# Exclude the neural sample as specified for this project.
+keep <- !grepl("HH789_neural-S_S16", sample_ids, fixed = TRUE)
+sample_ids <- sample_ids[keep]
+
+if (length(sample_ids) != 17L) {
+  stop("After excluding the neural sample, expected 17 samples but found ",
+       length(sample_ids), ". Check the count table and exclusion rule.")
+}
+
+# Check if the sample IDs are duplicated
+if (anyDuplicated(sample_ids)) {
+  stop("Duplicate sample IDs found after shortening BAM column names.")
+}
+
+# get counts from samples except for neural sample
+counts <- as.matrix(fc[, sample_columns[keep], drop = FALSE])
+rownames(counts) <- fc$Geneid
+colnames(counts) <- sample_ids
+if (anyNA(counts) || any(counts < 0)) {
+  stop("Count data contain missing or negative values.")
+}
+
+# deseq requires input integer
+storage.mode(counts) <- "integer"
+
+## 3. Build metadata from sample IDs and the genotype key provided by the lab.
+strain_id <- sub("^GSF4595-(HH[0-9]+)_.*$", "\\1", sample_ids)
+
+# transfer num to genotype name
+genotype <- unname(c(
+  HH789 = "WT",
+  HH791 = "adr2-",
+  HH792 = "adr2_E193A"
+)[strain_id])
+
+# get experiment condition from sample name
+condition <- ifelse(
+  grepl("_f_rep", sample_ids), "fed",
+  ifelse(grepl("_s_rep", sample_ids), "starved", NA_character_)
+)
+
+# get replicate number from sample name
+replicate <- sub(".*_rep([0-9]+).*", "\\1", sample_ids)
+
+# check these three characteristics
+if (anyNA(genotype) || anyNA(condition) || anyNA(replicate)) {
+  stop("Could not assign genotype, condition, or replicate to every sample.")
+}
+
+metadata <- data.frame(
+  genotype = genotype,
+  condition = condition,
+  replicate = replicate,
+  row.names = sample_ids
+)
+metadata$group <- factor(
+  paste(metadata$genotype, metadata$condition, sep = "_"),
+  levels = c(
+    "WT_starved", "adr2-_starved", "adr2_E193A_starved",
+    "WT_fed", "adr2-_fed", "adr2_E193A_fed"
+  )
+)
+
+cat("Sample counts by group (expected total = 17):\n")
+print(table(metadata$group))
+write.csv(metadata, file.path(output_dir, "sample_metadata.csv"))
+
+# Ensure that the column order of the count matrix is exactly the same as the row order of the metadata
+if (!identical(colnames(counts), rownames(metadata))) {
+  stop("Count columns and metadata rows are not in the same order.")
+}
+
+## 4. DESeq
+# DESeq2 expects raw integer counts, not TPM/FPKM or normalized counts.
+dds <- DESeqDataSetFromMatrix(
+  countData = counts,
+  colData = metadata,
+  design = ~ group
+)
+
+# Remove genes with fewer than 10 raw counts across all samples.
+dds <- dds[rowSums(counts(dds)) >= 10, ]
+dds <- DESeq(dds)
+
+# save deseq data sets
+saveRDS(dds, file.path(output_dir, "dds_GSF4595.rds"))
+
+# Define the 7 pairwise comparisons to be made.
+# The format of "contrast" is: c("group variable", "molecular group", "reference group")
+# Positive log2 fold change means the first group has higher expression than the second group in each comparison.
+comparisons <- list(
+  # mutant vs WT：+log2FC means the expression of mutant is higher
+  adr2minus_vs_WT_starved = c("group", "adr2-_starved", "WT_starved"),
+  adr2_E193A_vs_WT_starved = c("group", "adr2_E193A_starved", "WT_starved"),
+  adr2minus_vs_WT_fed = c("group", "adr2-_fed", "WT_fed"),
+  adr2_E193A_vs_WT_fed = c("group", "adr2_E193A_fed", "WT_fed"),
+  
+  # adr2- vs ADR-2 E193A:
+  adr2minus_vs_adr2_E193A_starved =
+    c("group", "adr2-_starved", "adr2_E193A_starved"),
+  adr2minus_vs_adr2_E193A_fed =
+    c("group", "adr2-_fed", "adr2_E193A_fed"),
+  
+  # starved vs fed in the same genotype:
+  WT_starved_vs_fed =
+    c("group", "WT_starved", "WT_fed"),
+  adr2minus_starved_vs_fed =
+    c("group", "adr2-_starved", "adr2-_fed"),
+  adr2_E193A_starved_vs_fed =
+    c("group", "adr2_E193A_starved", "adr2_E193A_fed")
+)
+
+for (comparison_name in names(comparisons)) {
+  res <- results(
+    dds,
+    contrast = comparisons[[comparison_name]],
+    alpha = 0.05
+  )
+  # change deseq objective to dataframe
+  res_table <- as.data.frame(res)
+  # get gene name, biotype
+  res_table$gene_id <- rownames(res_table)
+  gene_idx <- match(res_table$gene_id, gene_annotation$gene_id)
+  res_table$gene_name <- gene_annotation$gene_name[gene_idx]
+  res_table$gene_biotype <- gene_annotation$gene_biotype[gene_idx]
+  # order padj from small to large
+  res_table <- res_table[
+    order(is.na(res_table$padj), res_table$padj),
+    c("gene_id", "gene_name", "gene_biotype",
+      setdiff(colnames(res_table), c("gene_id", "gene_name", "gene_biotype")))
+  ]
+  write.csv(
+    res_table,
+    file.path(output_dir, paste0(comparison_name, ".csv")),
+    row.names = FALSE
+  )
+}
+
+## 5. Extract the standardized counts from the DESeq2 object.
+# normalize according to size factor
+normalized_counts <- counts(dds, normalized = TRUE)
+write.table(
+  normalized_counts,
+  file.path(output_dir, "normalized_counts.tsv"),
+  sep = "\t",
+  quote = FALSE,
+  col.names = NA
+)
+
+# # Write the current version information of R and the loaded software packages into a file.
+writeLines(capture.output(sessionInfo()),
+           file.path(output_dir, "sessionInfo.txt"))
+cat("DESeq2 finished. Results saved in ", output_dir, "\n", sep = "")
