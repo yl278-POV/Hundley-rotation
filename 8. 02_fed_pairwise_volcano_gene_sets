@@ -1,0 +1,289 @@
+# fed L1: pairwise differential-expression comparisons among WT,
+# adr2-, and adr2_E193A.
+
+## 1. load file path
+project_dir <- "/Users/yangfan/Documents/2026 Fall/3rd Rotation/GSF4595"
+setwd(project_dir)
+
+results_dir <- file.path(project_dir, "DESeq2_results")
+output_dir <- file.path(project_dir, "02_fed_pairwise_volcano_gene_sets")
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+dds_file <- file.path(results_dir, "dds_GSF4595.rds")
+if (!file.exists(dds_file)) {
+  stop("Cannot find DESeq2 object: ", dds_file)
+}
+
+library(DESeq2)
+library(ggplot2)
+
+## 2. load dds and required comparisons groups
+dds <- readRDS(dds_file)
+group_levels <- levels(colData(dds)$group)
+required_groups <- c("WT_fed", "adr2-_fed", "adr2_E193A_fed")
+
+# These three contrasts cover all pairwise comparisons among the three fed groups. In each contrast, the numerator is the first group named.
+# Therefore positive log2FC means higher expression in the numerator.
+comparisons <- list(
+  adr2minus_vs_WT_fed = c("group", "adr2-_fed", "WT_fed"),
+  adr2E193A_vs_WT_fed = c("group", "adr2_E193A_fed", "WT_fed"),
+  adr2minus_vs_adr2E193A_fed =
+    c("group", "adr2-_fed", "adr2_E193A_fed")
+)
+
+## 3. Get gene symbols stored in the DESeq2 result CSVs.
+gene_map_files <- c(
+  file.path(results_dir, "adr2minus_vs_WT_fed.csv"),
+  file.path(results_dir, "adr2_E193A_vs_WT_fed.csv")
+)
+gene_maps <- lapply(gene_map_files, function(path) {
+  x <- read.csv(path, stringsAsFactors = FALSE, check.names = FALSE)
+  x[, intersect(c("gene_id", "gene_name", "gene_biotype"), names(x)),
+    drop = FALSE]
+})
+gene_map <- unique(do.call(rbind, gene_maps))
+gene_map <- gene_map[!duplicated(gene_map$gene_id), , drop = FALSE]
+
+## 4. set cutoff: padj < 0.05 and |log2FC| > 0.5.
+lfc_cutoff <- 0.5
+fdr_cutoff <- 0.05
+
+workbook <- openxlsx::createWorkbook()
+summary_rows <- list()
+
+# The name of an Excel worksheet can have a maximum of 31 characters; this function cleans up the name and limits its length
+safe_sheet_name <- function(x) substr(gsub("[^A-Za-z0-9_]", "_", x), 1, 31)
+# write gene sets in excel sheets
+write_gene_set_sheet <- function(wb, sheet, dat) {
+  sheet <- safe_sheet_name(sheet)
+  openxlsx::addWorksheet(wb, sheet)
+  openxlsx::writeData(wb, sheet, dat)
+}
+
+## 5. compare, save results and volcano plot
+for (comparison_name in names(comparisons)) {
+  # get numerator and denominator groups
+  contrast_groups <- strsplit(comparison_name, "_vs_")[[1]]
+  numerator_label <- sub("_fed$", "", contrast_groups[1])
+  denominator_label <- sub("_fed$", "", contrast_groups[2])
+  # get dds results
+  res <- DESeq2::results(
+    dds,
+    contrast = comparisons[[comparison_name]],
+    alpha = fdr_cutoff
+  )
+  
+  res_df <- as.data.frame(res)
+  res_df$gene_id <- rownames(res_df)
+  # add gene_name and biotype according to gene_id
+  map_idx <- match(res_df$gene_id, gene_map$gene_id)
+  res_df$gene_name <- gene_map$gene_name[map_idx]
+  
+  if ("gene_biotype" %in% names(gene_map)) {
+    res_df$gene_biotype <- gene_map$gene_biotype[map_idx]
+  } else {
+    res_df$gene_biotype <- NA_character_
+  }
+  # display gene_name first, else gene_id 
+  res_df$gene_label <- ifelse(
+    is.na(res_df$gene_name) | res_df$gene_name == "",
+    res_df$gene_id,
+    res_df$gene_name
+  )
+  res_df$comparison <- comparison_name
+  res_df$direction <- ifelse(
+    res_df$log2FoldChange > 0,
+    paste0("Higher in ", numerator_label),
+    paste0("Higher in ", denominator_label)
+  )
+  # Screening significant genes according to padj and |log2FC|
+  res_df$significant <- !is.na(res_df$padj) &
+    !is.na(res_df$log2FoldChange) &
+    res_df$padj < fdr_cutoff &
+    abs(res_df$log2FoldChange) > lfc_cutoff
+  # Save the complete result table for this contrast.
+  result_out <- res_df[order(is.na(res_df$padj), res_df$padj), ]
+  write.csv(
+    result_out,
+    file.path(output_dir, paste0(comparison_name, "_all_genes.csv")),
+    row.names = FALSE,
+    na = ""
+  )
+  # Regulate up-regulated and down-regulated genes
+  for (direction in c("up", "down")) {
+    direction_hit <- if (direction == "up") {
+      res_df$significant & res_df$log2FoldChange > lfc_cutoff
+    } else {
+      res_df$significant & res_df$log2FoldChange < -lfc_cutoff
+    }
+    
+    gene_set <- res_df[direction_hit, c(
+      "gene_id", "gene_name", "gene_label", "gene_biotype",
+      "baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"
+    )]
+    gene_set <- gene_set[order(gene_set$padj), ]
+    
+    sheet_name <- paste(
+      gsub("_fed", "", comparison_name),
+      direction,
+      sep = "_"
+    )
+    write_gene_set_sheet(workbook, sheet_name, gene_set)
+    
+    summary_rows[[length(summary_rows) + 1L]] <- data.frame(
+      comparison = comparison_name,
+      cutoff = "padj",
+      direction = direction,
+      n_genes = nrow(gene_set),
+      stringsAsFactors = FALSE
+    )
+  }
+  
+  # use genes with padj and log2FC for volcano plots
+  plot_df <- res_df[
+    !is.na(res_df$padj) & is.finite(res_df$log2FoldChange),
+    ,
+    drop = FALSE
+  ]
+  
+  # padj 为 0 时用最小正数代替，避免计算 log10(0)。
+  plot_df$neg_log10_padj <- -log10(
+    pmax(plot_df$padj, .Machine$double.xmin)
+  )
+  
+  # 用 padj < 0.05 且 |log2FC| > 0.5 判断显著性和方向。
+  plot_df$plot_class <- "Not significant"
+  plot_df$plot_class[
+    plot_df$significant & plot_df$log2FoldChange > lfc_cutoff
+  ] <- "Upregulated"
+  plot_df$plot_class[
+    plot_df$significant & plot_df$log2FoldChange < -lfc_cutoff
+  ] <- "Downregulated"
+  
+  # 上调和下调基因分别选 padj 最小的 10 个来标注名称。
+  up_df <- plot_df[plot_df$plot_class == "Upregulated", ]
+  down_df <- plot_df[plot_df$plot_class == "Downregulated", ]
+  
+  label_df <- rbind(
+    head(up_df[order(up_df$padj), ], 10),
+    head(down_df[order(down_df$padj), ], 10)
+  )
+  
+  # 计算图上方文字的位置，并统计上下调基因数。
+  x_min <- min(plot_df$log2FoldChange, na.rm = TRUE)
+  x_max <- max(plot_df$log2FoldChange, na.rm = TRUE)
+  x_range <- x_max - x_min
+  y_top <- max(plot_df$neg_log10_padj, 2, na.rm = TRUE)
+  
+  n_up <- nrow(up_df)
+  n_down <- nrow(down_df)
+  
+  p <- ggplot2::ggplot(
+    plot_df,
+    ggplot2::aes(
+      x = log2FoldChange,
+      y = neg_log10_padj,
+      color = plot_class
+    )
+  ) +
+    # 图中显示所有基因；显著基因用红/蓝色，其余基因用灰色。
+    ggplot2::geom_point(alpha = 0.7, size = 1.2) +
+    
+    # 两条竖线标出 log2FC 的筛选界限，横线标出 padj 界限。
+    ggplot2::geom_vline(
+      xintercept = c(-lfc_cutoff, lfc_cutoff),
+      linetype = "dotted",
+      color = "grey35"
+    ) +
+    ggplot2::geom_hline(
+      yintercept = -log10(fdr_cutoff),
+      linetype = "dashed",
+      color = "grey35"
+    ) +
+    
+    # 每个方向标注最多 10 个显著基因名称。
+    ggplot2::geom_text(
+      data = label_df,
+      ggplot2::aes(label = gene_label),
+      color = "black",
+      size = 3,
+      vjust = -0.7,
+      check_overlap = TRUE,
+      show.legend = FALSE
+    ) +
+    
+    # 在图上方分别显示上调和下调基因数量。
+    ggplot2::annotate(
+      "text",
+      x = x_min + 0.25 * x_range,
+      y = 0.92 * y_top,
+      label = paste(n_down, "downregulated"),
+      color = "royalblue3",
+      fontface = "bold",
+      size = 5
+    ) +
+    ggplot2::annotate(
+      "text",
+      x = x_min + 0.75 * x_range,
+      y = 0.92 * y_top,
+      label = paste(n_up, "upregulated"),
+      color = "firebrick2",
+      fontface = "bold",
+      size = 5
+    ) +
+    
+    # 图例只解释红、蓝、灰三种颜色。
+    ggplot2::scale_color_manual(
+      values = c(
+        "Upregulated" = "firebrick2",
+        "Downregulated" = "royalblue3",
+        "Not significant" = "grey75"
+      )
+    ) +
+    ggplot2::labs(
+      title = gsub("_", " ", comparison_name),
+      subtitle = paste0(
+        "Cutoff: padj < ", fdr_cutoff,
+        " and |log2FC| > ", lfc_cutoff
+      ),
+      x = "log2 Fold Change",
+      y = "-log10 padj",
+      color = NULL
+    ) +
+    ggplot2::theme_classic() +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(hjust = 0.5),
+      plot.subtitle = ggplot2::element_text(hjust = 0.5)
+    )
+  
+  ggplot2::ggsave(
+    file.path(output_dir, paste0(comparison_name, "_volcano.png")),
+    plot = p,
+    width = 9,
+    height = 7,
+    dpi = 300
+  )
+  ggplot2::ggsave(
+    file.path(output_dir, paste0(comparison_name, "_volcano.pdf")),
+    plot = p,
+    width = 9,
+    height = 7
+  )
+}
+
+## 6. save gene sets and counts as Excel
+openxlsx::saveWorkbook(
+  workbook,
+  file.path(output_dir, "fed_pairwise_gene_sets.xlsx"),
+  overwrite = TRUE
+)
+
+summary_table <- do.call(rbind, summary_rows)
+write.csv(
+  summary_table,
+  file.path(output_dir, "fed_pairwise_gene_set_summary.csv"),
+  row.names = FALSE
+)
+
+cat("Finished. Outputs saved in:\n", output_dir, "\n", sep = "")
+cat("Three pairwise volcano plots, complete contrast CSVs, an Excel workbook\n")
+cat("with up/down sets for both article-style and FDR cutoffs, and a summary CSV.\n")
