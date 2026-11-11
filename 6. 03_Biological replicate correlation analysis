@@ -1,0 +1,104 @@
+## 1. set file path and load files
+project_dir <- "/Users/yangfan/Documents/2026 Fall/3rd Rotation/GSF4595"
+setwd(project_dir)
+library(DESeq2)
+library(ggplot2)
+dds <- readRDS(file.path("DESeq2_results", "dds_GSF4595.rds"))
+qc_dir <- file.path("03_Biological replicate correlation analysis")
+dir.create(qc_dir, recursive = TRUE, showWarnings = FALSE)
+
+## 2. VST transfer for dds (VST is for visualization and correlation)
+vsd <- vst(dds, blind = FALSE)
+expr <- assay(vsd)
+
+## 3. compare between replicates
+# get sample information from dds
+sample_info <- as.data.frame(colData(dds))
+sample_info$sample_id <- rownames(sample_info)
+# get experimental groups
+groups <- unique(as.character(sample_info$group))
+# set up a blank csv for data storage
+correlation_summary <- data.frame()
+
+for (group_name in groups) {
+  samples <- sample_info$sample_id[
+    as.character(sample_info$group) == group_name
+  ]
+  
+  if (length(samples) < 2) {
+    message("JUMP! ", group_name, "less than 2 samples")
+    next
+  }
+  
+  # get pairs
+  pairs <- combn(samples, 2, simplify = FALSE)
+  
+  for (pair in pairs) {
+    sample1 <- pair[1]
+    sample2 <- pair[2]
+    
+    x <- expr[, sample1]
+    y <- expr[, sample2]
+    
+    pearson_r <- cor(x, y, method = "pearson", use = "complete.obs")
+    spearman_rho <- cor(x, y, method = "spearman", use = "complete.obs")
+    # get dataframe for plot
+    plot_data <- data.frame(
+      gene_id = rownames(expr),
+      sample1_expression = x,
+      sample2_expression = y
+    )
+    # get plot
+    p <- ggplot(
+      plot_data,
+      aes(x = sample1_expression, y = sample2_expression)
+    ) +
+      geom_point(alpha = 0.35, size = 0.8, color = "#2878B5") +
+      geom_abline(
+        slope = 1, intercept = 0,
+        linetype = "dashed", color = "gray40"
+      ) +
+      labs(
+        title = paste(group_name, ":", sample1, "vs", sample2),
+        subtitle = sprintf(
+          "Pearson r = %.3f   |   Spearman rho = %.3f",
+          pearson_r, spearman_rho
+        ),
+        x = paste("VST expression:", sample1),
+        y = paste("VST expression:", sample2)
+      ) +
+      theme_classic()
+    
+    safe_group <- gsub("[^A-Za-z0-9_-]", "_", group_name)
+    safe_pair <- gsub("[^A-Za-z0-9_-]", "_", paste(sample1, "vs", sample2))
+    # save pdf and png
+    ggsave(
+      filename = file.path(qc_dir, paste0(safe_group, "__", safe_pair, ".pdf")),
+      plot = p, width = 7, height = 6
+    )
+    ggsave(
+      filename = file.path(qc_dir, paste0(safe_group, "__", safe_pair, ".png")),
+      plot = p, width = 7, height = 6, dpi = 300
+    )
+    
+    correlation_summary <- rbind(
+      correlation_summary,
+      data.frame(
+        group = group_name,
+        sample1 = sample1,
+        sample2 = sample2,
+        pearson_r = pearson_r,
+        spearman_rho = spearman_rho
+      )
+    )
+  }
+}
+
+## 4. conclude pearson R in csv file 
+write.csv(
+  correlation_summary,
+  file.path(qc_dir, "replicate_correlation_summary.csv"),
+  row.names = FALSE
+)
+
+correlation_summary
